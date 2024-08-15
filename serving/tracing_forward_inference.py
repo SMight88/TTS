@@ -118,7 +118,7 @@ class Tracing:
     def trace(self):
         logging.info(f'Tracing into {self.export_format} format...')
         model_name = "xtts"
-        wrapped_model = XttsWrapper(self.model)
+        wrapped_model = XttsWrapper(self.model).to(self.model.device)
         self.export_and_save(
             model=wrapped_model,
             example_inputs={
