@@ -40,8 +40,8 @@ class Tracing:
         self.load_checkpoint()
         if use_tensors:
             logging.info(f'Use predefined tensors for tracing instead of random tensors.')
-            self.trace_audio_input = torch.load('serving/audio_16k.pt').to(self.model.device)
-            self.trace_text_input = torch.load('serving/text_tokens.pt').to(self.model.device)
+            self.trace_audio_input = torch.load('serving/tensors/audio_16k.pt').to(self.model.device)
+            self.trace_text_input = torch.load('serving/tensors/text_tokens.pt').to(self.model.device)
         else:
             self.trace_audio_len = 300000
             self.trace_text_len = 100
