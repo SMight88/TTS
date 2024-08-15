@@ -691,6 +691,146 @@ class Xtts(BaseTTS):
                     last_tokens = []
                     yield wav_chunk
 
+    def preprocess(self, text, config, speaker_wav, language, speaker_id=None, **kwargs):
+        """Preprocess speech with the given input text.
+
+        Args:
+            text (str): Input text.
+            config (XttsConfig): Config with inference parameters.
+            speaker_wav (list): List of paths to the speaker audio files to be used for cloning.
+            language (str): Language ID of the speaker.
+            **kwargs: Inference settings. See `inference()`.
+
+        Returns:
+
+        """
+        assert (
+            "zh-cn" if language == "zh" else language in self.config.languages
+        ), f" ❗ Language {language} is not supported. Supported languages are {self.config.languages}"
+        # Use generally found best tuning knobs for generation.
+        settings = {
+            "temperature": config.temperature,
+            "length_penalty": config.length_penalty,
+            "repetition_penalty": config.repetition_penalty,
+            "top_k": config.top_k,
+            "top_p": config.top_p,
+        }
+        settings.update(kwargs)  # allow overriding of preset settings with kwargs
+        if speaker_id is not None:
+            gpt_cond_latent, speaker_embedding = self.speaker_manager.speakers[speaker_id].values()
+            return self.inference(text, language, gpt_cond_latent, speaker_embedding, **settings)
+        settings.update({
+            "gpt_cond_len": config.gpt_cond_len,
+            "gpt_cond_chunk_len": config.gpt_cond_chunk_len,
+            "max_ref_len": config.max_ref_len,
+            "sound_norm_refs": config.sound_norm_refs,
+        })
+
+        audio_path = speaker_wav
+        load_sr = 22050
+
+        # deal with multiples references
+        if not isinstance(audio_path, list):
+            audio_paths = [audio_path]
+        else:
+            audio_paths = audio_path
+
+        audios = []
+        max_ref_length = settings['max_ref_len']
+        sound_norm_refs = settings['sound_norm_refs']
+        librosa_trim_db = None
+        for file_path in audio_paths:
+            audio = load_audio(file_path, load_sr)
+            audio = audio[:, : load_sr * max_ref_length].to(self.device)
+            if sound_norm_refs:
+                audio = (audio / torch.abs(audio).max()) * 0.75
+            if librosa_trim_db is not None:
+                audio = librosa.effects.trim(audio, top_db=librosa_trim_db)[0]
+            audios.append(audio)
+
+        # merge all the audios
+        full_audio = torch.cat(audios, dim=-1)
+
+        enable_text_splitting = False
+
+        language = language.split("-")[0]  # remove the country code
+
+        if enable_text_splitting:
+            text = split_sentence(text, language, self.tokenizer.char_limits[language])
+        else:
+            text = [text]
+
+        text_tokens_all = []
+        for sent in text:
+            sent = sent.strip().lower()
+            text_tokens = torch.IntTensor(self.tokenizer.encode(sent, lang=language)).unsqueeze(0).to(self.device)
+            assert (
+                    text_tokens.shape[-1] < self.args.gpt_max_text_tokens
+            ), " ❗ XTTS can only generate text with a maximum of 400 tokens."
+            text_tokens_all.append(text_tokens)
+
+        # merge all the tokens
+        full_tokens = torch.cat(text_tokens_all, dim=-1)
+
+        return full_audio, full_tokens
+
+    def forward_inference(self, audio, text_tokens):
+        load_sr = 22050
+        gpt_cond_len = 6
+        gpt_cond_chunk_len = 6
+        speed = 1
+        length_scale = 1.0 / max(speed, 0.05)
+        do_sample = True
+        top_k = 50
+        top_p = 0.85
+        temperature = 0.75
+        num_beams = 1
+        length_penalty = 1.0
+        repetition_penalty = 5.0
+
+        gpt_cond_latent = self.get_gpt_cond_latents(
+            audio, load_sr, length=gpt_cond_len, chunk_length=gpt_cond_chunk_len
+        )  # [1, 1024, T]
+        speaker_embeddings = self.get_speaker_embedding(audio, load_sr).mean(dim=0)
+
+        with torch.no_grad():
+            gpt_codes = self.gpt.generate(
+                cond_latents=gpt_cond_latent,
+                text_inputs=text_tokens,
+                input_tokens=None,
+                do_sample=do_sample,
+                top_p=top_p,
+                top_k=top_k,
+                temperature=temperature,
+                num_return_sequences=self.gpt_batch_size,
+                num_beams=num_beams,
+                length_penalty=length_penalty,
+                repetition_penalty=repetition_penalty,
+                output_attentions=False,
+            )
+            expected_output_len = torch.tensor(
+                [gpt_codes.shape[-1] * self.gpt.code_stride_len], device=text_tokens.device
+            )
+
+            text_len = torch.tensor([text_tokens.shape[-1]], device=self.device)
+            gpt_latents = self.gpt(
+                text_tokens,
+                text_len,
+                gpt_codes,
+                expected_output_len,
+                cond_latents=gpt_cond_latent,
+                return_attentions=False,
+                return_latent=True,
+            )
+
+            if length_scale != 1.0:
+                gpt_latents = F.interpolate(
+                    gpt_latents.transpose(1, 2), scale_factor=length_scale, mode="linear"
+                ).transpose(1, 2)
+
+            wavs = self.hifigan_decoder(gpt_latents, g=speaker_embeddings)
+        return wavs
+
     def forward(self):
         raise NotImplementedError(
             "XTTS has a dedicated trainer, please check the XTTS docs: https://tts.readthedocs.io/en/dev/models/xtts.html#training"
