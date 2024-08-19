@@ -568,14 +568,20 @@ class GPT(nn.Module):
         emb = self.text_embedding(text_inputs) + self.text_pos_embedding(text_inputs)
         emb = torch.cat([cond_latents, emb], dim=1)
         self.gpt_inference.store_prefix_emb(emb)
-        gpt_inputs = torch.full(
-            (
-                emb.shape[0],
-                emb.shape[1] + 1,  # +1 for the start_audio_token
-            ),
-            fill_value=1,
-            dtype=torch.long,
-            device=text_inputs.device,
+        # gpt_inputs = torch.full(
+        #     (
+        #         emb.shape[0],
+        #         emb.shape[1] + 1,  # +1 for the start_audio_token
+        #     ),
+        #     fill_value=1,
+        #     dtype=torch.long,
+        #     device=text_inputs.device,
+        # )
+        gpt_inputs = torch.tensor(
+            [1], dtype=torch.long, device=text_inputs.device
+        ).repeat(
+            emb.shape[0],
+            emb.shape[1] + 1  # +1 for the start_audio_token
         )
         gpt_inputs[:, -1] = self.start_audio_token
         return gpt_inputs
